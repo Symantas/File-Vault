@@ -54,13 +54,17 @@ python main.py decrypt backup.vault -f               # allow overwriting files
 ## Vault file format
 
 ```
-container:  magic "FVLT" (4) | version (1) | encrypted blob
-blob:       salt (16) | nonce (12) | ciphertext (+ 16-byte GCM tag)
+container:  magic "FVLT" (4) | version 3 (1) | encrypted blob
+blob:       kdf-param block | salt (16) | nonce (12) | ciphertext (+ 16-byte GCM tag)
 plaintext:  a custom archive of the file/folder tree (names + contents)
 ```
 
-The original names and directory layout live *inside* the encrypted payload, so
-they are never exposed on disk.
+The KDF parameter block makes each vault **self-describing**: it records the key
+derivation algorithm and its work factor, so the key is always re-derived with
+the parameters used at encryption time. The container header and this block are
+authenticated as GCM associated data, so they cannot be tampered with or
+downgraded. The original names and directory layout live *inside* the encrypted
+payload, so they are never exposed on disk.
 
 ## Architecture
 
@@ -70,10 +74,11 @@ swapped or tested in isolation:
 
 | Path                  | Responsibility                                          |
 | --------------------- | ------------------------------------------------------- |
-| `Vault/kdf.py`        | `KeyDerivation` interface + PBKDF2 implementation       |
+| `Vault/kdf.py`        | `KeyDerivation` interface + PBKDF2 and scrypt           |
+| `Vault/kdfparams.py`  | KDF-parameter (de)serialization + algorithm registry    |
 | `Vault/cipher.py`     | `Encryptor` interface + AES-256-GCM (composes a KDF)    |
 | `Vault/archive.py`    | `Archiver` interface + safe file/folder (de)serializing |
-| `Vault/container.py`  | Versioned vault header framing                          |
+| `Vault/container.py`  | `Container` interface + versioned header framing        |
 | `Vault/service.py`    | `VaultService` orchestrator (dependency-injected)       |
 | `Vault/errors.py`     | `VaultError` exception hierarchy                        |
 | `Vault/cli.py`        | `argparse` command-line interface                       |
@@ -82,12 +87,14 @@ swapped or tested in isolation:
 | `main.py`             | Entry point                                             |
 
 `VaultService` wires the defaults together but accepts any `Encryptor`,
-`Archiver`, or `VaultContainer`, e.g.:
+`Archiver`, or `Container`. For high-value data you can choose a memory-hard KDF
+or a higher work factor — the choice is stored in the vault, so it always
+decrypts correctly:
 
 ```python
-from Vault import VaultService, AesGcmEncryptor, PBKDF2KeyDerivation
+from Vault import VaultService, AesGcmEncryptor, ScryptKeyDerivation
 
-service = VaultService(encryptor=AesGcmEncryptor(PBKDF2KeyDerivation(iterations=600_000)))
+service = VaultService(encryptor=AesGcmEncryptor(ScryptKeyDerivation()))
 service.encrypt_path("my-folder", "password")
 ```
 

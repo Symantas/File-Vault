@@ -51,7 +51,17 @@ class Archiver(ABC):
 
     @abstractmethod
     def unpack(self, data: bytes, destination_dir: str, overwrite: bool = False) -> list[str]:
-        """Restore an archive under ``destination_dir``; return written paths."""
+        """Restore an archive under ``destination_dir``; return written file paths.
+
+        Contract (all implementations must honor it):
+
+        - If ``overwrite`` is ``False`` (default), an existing target file MUST
+          raise :class:`~Vault.errors.OverwriteError` and MUST NOT be modified.
+          Existing directories may be reused.
+        - If ``overwrite`` is ``True``, existing files are replaced.
+        - Every entry path MUST stay within ``destination_dir``; an entry that
+          escapes it MUST raise :class:`~Vault.errors.PathTraversalError`.
+        """
 
 
 class DirectoryArchiver(Archiver):

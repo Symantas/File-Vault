@@ -1,30 +1,52 @@
 """Versioned vault container framing.
 
-A :class:`VaultContainer` adds a small header to an encrypted blob so the format
-is self-identifying and can evolve over time::
+A :class:`Container` adds a small header to an encrypted blob so the format is
+self-identifying and can evolve over time::
 
     magic "FVLT" (4 bytes) | version (1 byte) | encrypted blob
+
+Keeping this behind an abstraction lets :class:`~Vault.service.VaultService`
+depend on the interface rather than a concrete format (Dependency Inversion), and
+lets a new format be added as a new subclass (Open/Closed).
 """
 
 import struct
+from abc import ABC, abstractmethod
 
 from .errors import ContainerError
 
 
-class VaultContainer:
-    """Wraps and unwraps encrypted blobs with a magic + version header."""
+class Container(ABC):
+    """Frames an encrypted blob with a self-identifying header."""
+
+    @abstractmethod
+    def header(self) -> bytes:
+        """Return the exact header bytes (used as authenticated associated data)."""
+
+    @abstractmethod
+    def wrap(self, blob: bytes) -> bytes:
+        """Prepend the container header to ``blob``."""
+
+    @abstractmethod
+    def unwrap(self, container: bytes) -> bytes:
+        """Validate the header and return the inner encrypted blob."""
+
+
+class VaultContainer(Container):
+    """The current File-Vault container: a magic + version header."""
 
     MAGIC = b"FVLT"
-    VERSION = 2  # v2: payload is always an archive (supports files and folders)
+    VERSION = 3  # v3: self-describing KDF parameters, header authenticated as AAD
 
     _HEADER = struct.Struct(">4sB")
 
+    def header(self) -> bytes:
+        return self._HEADER.pack(self.MAGIC, self.VERSION)
+
     def wrap(self, blob: bytes) -> bytes:
-        """Prepend the container header to ``blob``."""
-        return self._HEADER.pack(self.MAGIC, self.VERSION) + blob
+        return self.header() + blob
 
     def unwrap(self, container: bytes) -> bytes:
-        """Validate the header and return the inner encrypted blob."""
         if len(container) < self._HEADER.size:
             raise ContainerError("file is too short to be a vault container")
         magic, version = self._HEADER.unpack(container[: self._HEADER.size])

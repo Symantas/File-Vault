@@ -2,7 +2,7 @@
 
 from .archive import Archiver, DirectoryArchiver
 from .cipher import AesGcmEncryptor, Encryptor
-from .container import VaultContainer
+from .container import Container, VaultContainer
 from .errors import (
     ArchiveError,
     ContainerError,
@@ -11,7 +11,12 @@ from .errors import (
     PathTraversalError,
     VaultError,
 )
-from .kdf import KeyDerivation, PBKDF2KeyDerivation
+from .kdf import (
+    KdfParams,
+    KeyDerivation,
+    PBKDF2KeyDerivation,
+    ScryptKeyDerivation,
+)
 from .service import VAULT_SUFFIX, VaultService
 
 __all__ = [
@@ -19,9 +24,12 @@ __all__ = [
     "DirectoryArchiver",
     "AesGcmEncryptor",
     "Encryptor",
+    "Container",
     "VaultContainer",
+    "KdfParams",
     "KeyDerivation",
     "PBKDF2KeyDerivation",
+    "ScryptKeyDerivation",
     "VaultService",
     "VAULT_SUFFIX",
     "VaultError",
@@ -31,4 +39,4 @@ __all__ = [
     "PathTraversalError",
     "OverwriteError",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -10,7 +10,7 @@ import os
 
 from .archive import Archiver, DirectoryArchiver
 from .cipher import AesGcmEncryptor, Encryptor
-from .container import VaultContainer
+from .container import Container, VaultContainer
 
 VAULT_SUFFIX = ".vault"
 
@@ -22,7 +22,7 @@ class VaultService:
         self,
         encryptor: Encryptor | None = None,
         archiver: Archiver | None = None,
-        container: VaultContainer | None = None,
+        container: Container | None = None,
     ) -> None:
         self._encryptor = encryptor or AesGcmEncryptor()
         self._archiver = archiver or DirectoryArchiver()
@@ -37,7 +37,10 @@ class VaultService:
         default). The container is created with owner-only permissions.
         """
         archive = self._archiver.pack(source)
-        blob = self._encryptor.encrypt(archive, password)
+        # Authenticate the container header so its version/magic cannot be altered.
+        blob = self._encryptor.encrypt(
+            archive, password, associated_data=self._container.header()
+        )
         container = self._container.wrap(blob)
 
         if destination is None:
@@ -63,7 +66,9 @@ class VaultService:
             container = fh.read()
 
         blob = self._container.unwrap(container)
-        archive = self._encryptor.decrypt(blob, password)
+        archive = self._encryptor.decrypt(
+            blob, password, associated_data=self._container.header()
+        )
 
         if destination_dir is None:
             destination_dir = os.path.dirname(os.path.abspath(source))
