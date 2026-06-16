@@ -23,6 +23,7 @@ Archive layout::
 import os
 import struct
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .errors import ArchiveError, OverwriteError, PathTraversalError
@@ -111,11 +112,13 @@ class DirectoryArchiver(Archiver):
         entries: list[_Entry] = [_Entry(rel, is_dir=True)]
         # followlinks=False prevents symlink loops and reading outside the tree.
         for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
-            dirnames.sort()
-            for name in sorted(dirnames):
+            # Sorted, non-symlinked subdirs: used both for entries and for descent.
+            subdirs = [
+                d for d in sorted(dirnames)
+                if not os.path.islink(os.path.join(dirpath, d))
+            ]
+            for name in subdirs:
                 full = os.path.join(dirpath, name)
-                if os.path.islink(full):
-                    continue  # skip symlinked directories
                 entries.append(_Entry(self._relpath(full, base), is_dir=True))
             for name in sorted(filenames):
                 full = os.path.join(dirpath, name)
@@ -123,8 +126,7 @@ class DirectoryArchiver(Archiver):
                     continue  # skip symlinked files
                 with open(full, "rb") as fh:
                     entries.append(_Entry(self._relpath(full, base), is_dir=False, content=fh.read()))
-            # Do not descend into symlinked subdirectories.
-            dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+            dirnames[:] = subdirs  # descend only into the non-symlinked subdirs
         return entries
 
     @staticmethod
@@ -149,7 +151,7 @@ class DirectoryArchiver(Archiver):
 
     # -- unpacking helpers -------------------------------------------------
 
-    def _deserialize(self, data: bytes):
+    def _deserialize(self, data: bytes) -> Iterator[_Entry]:
         view = memoryview(data)
         offset = 0
 

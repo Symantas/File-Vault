@@ -56,7 +56,23 @@ class KeyDerivation(ABC):
         """Report this KDF's algorithm id and parameters for serialization."""
 
 
-class PBKDF2KeyDerivation(KeyDerivation):
+class _SizedKeyDerivation(KeyDerivation):
+    """Base for KDFs that carry a key size and salt size, providing both."""
+
+    def __init__(self, key_size: int, salt_size: int) -> None:
+        self._key_size = key_size
+        self._salt_size = salt_size
+
+    @property
+    def salt_size(self) -> int:
+        return self._salt_size
+
+    @property
+    def key_size(self) -> int:
+        return self._key_size
+
+
+class PBKDF2KeyDerivation(_SizedKeyDerivation):
     """PBKDF2-HMAC-SHA256 key derivation."""
 
     # OWASP-recommended minimum for PBKDF2-HMAC-SHA256 (2023).
@@ -68,17 +84,8 @@ class PBKDF2KeyDerivation(KeyDerivation):
         key_size: int = 32,
         salt_size: int = 16,
     ) -> None:
+        super().__init__(key_size, salt_size)
         self._iterations = iterations
-        self._key_size = key_size
-        self._salt_size = salt_size
-
-    @property
-    def salt_size(self) -> int:
-        return self._salt_size
-
-    @property
-    def key_size(self) -> int:
-        return self._key_size
 
     def derive(self, password: str, salt: bytes) -> bytes:
         kdf = PBKDF2HMAC(
@@ -98,7 +105,7 @@ class PBKDF2KeyDerivation(KeyDerivation):
         )
 
 
-class ScryptKeyDerivation(KeyDerivation):
+class ScryptKeyDerivation(_SizedKeyDerivation):
     """scrypt key derivation — memory-hard, resists GPU/ASIC brute forcing.
 
     Available without any extra dependency (it ships with ``cryptography``).
@@ -117,19 +124,10 @@ class ScryptKeyDerivation(KeyDerivation):
         key_size: int = 32,
         salt_size: int = 16,
     ) -> None:
+        super().__init__(key_size, salt_size)
         self._n = n
         self._r = r
         self._p = p
-        self._key_size = key_size
-        self._salt_size = salt_size
-
-    @property
-    def salt_size(self) -> int:
-        return self._salt_size
-
-    @property
-    def key_size(self) -> int:
-        return self._key_size
 
     def derive(self, password: str, salt: bytes) -> bytes:
         kdf = Scrypt(

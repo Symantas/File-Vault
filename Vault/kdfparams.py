@@ -20,6 +20,7 @@ bounded, and let a future algorithm add parameters without a format change.
 """
 
 import struct
+from dataclasses import dataclass
 from typing import Callable
 
 from .errors import ContainerError
@@ -35,96 +36,6 @@ from .kdf import (
 _PREFIX = struct.Struct(">BBBB")  # algo_id, key_size, salt_size, tlv_count
 _TLV = struct.Struct(">BQ")  # tag, value
 
-# Per-algorithm tag <-> extra-key mappings. Order is fixed for deterministic output.
-_TAGS: dict[int, list[tuple[int, str]]] = {
-    ALGO_PBKDF2_SHA256: [(0x01, "iterations")],
-    ALGO_SCRYPT: [(0x10, "n"), (0x11, "r"), (0x12, "p")],
-}
-
-# Human-readable algorithm names (for `info` / diagnostics).
-ALGO_NAMES: dict[int, str] = {
-    ALGO_PBKDF2_SHA256: "PBKDF2-HMAC-SHA256",
-    ALGO_SCRYPT: "scrypt",
-}
-
-
-def algorithm_name(algo_id: int) -> str:
-    """Return the human-readable name for a KDF algorithm id."""
-    try:
-        return ALGO_NAMES[algo_id]
-    except KeyError:
-        raise ContainerError(f"unsupported KDF algorithm id: {algo_id}")
-
-
-def serialize(params: KdfParams) -> bytes:
-    """Serialize ``params`` to the KDF parameter block."""
-    layout = _TAGS.get(params.algo_id)
-    if layout is None:
-        raise ContainerError(f"unsupported KDF algorithm id: {params.algo_id}")
-
-    chunks = [_PREFIX.pack(params.algo_id, params.key_size, params.salt_size, len(layout))]
-    for tag, key in layout:
-        chunks.append(_TLV.pack(tag, params.extra[key]))
-    return b"".join(chunks)
-
-
-def deserialize(blob: bytes) -> tuple[KdfParams, int]:
-    """Parse a KDF parameter block from the start of ``blob``.
-
-    Returns ``(params, bytes_consumed)``. Raises :class:`ContainerError` on a
-    malformed, truncated, or unknown block.
-    """
-    if len(blob) < _PREFIX.size:
-        raise ContainerError("KDF parameter block is truncated")
-    algo_id, key_size, salt_size, tlv_count = _PREFIX.unpack(blob[: _PREFIX.size])
-
-    layout = _TAGS.get(algo_id)
-    if layout is None:
-        raise ContainerError(f"unsupported KDF algorithm id: {algo_id}")
-
-    offset = _PREFIX.size
-    extra: dict[str, int] = {}
-    for _ in range(tlv_count):
-        if offset + _TLV.size > len(blob):
-            raise ContainerError("KDF parameter block is truncated")
-        tag, value = _TLV.unpack(blob[offset : offset + _TLV.size])
-        offset += _TLV.size
-        key = next((k for t, k in layout if t == tag), None)
-        if key is None:
-            raise ContainerError(f"unknown KDF parameter tag: {tag:#x}")
-        extra[key] = value
-
-    expected = {key for _, key in layout}
-    if extra.keys() != expected:
-        raise ContainerError("KDF parameter block is missing required parameters")
-
-    _validate(algo_id, key_size, salt_size, extra)
-    return KdfParams(algo_id, key_size, salt_size, extra), offset
-
-
-def _validate(algo_id: int, key_size: int, salt_size: int, extra: dict[str, int]) -> None:
-    """Reject nonsensical parameters from an untrusted block.
-
-    Crafted values (e.g. ``iterations=0`` or a non-power-of-two scrypt ``n``)
-    would otherwise reach the crypto backend *before* GCM authentication and
-    surface as a ``ValueError`` — or even a Rust ``PanicException`` — instead of a
-    clean :class:`ContainerError`. Validating here keeps every parse failure a
-    ``VaultError``.
-    """
-    if salt_size < 1:
-        raise ContainerError("invalid KDF salt size")
-    if key_size < 1:
-        raise ContainerError("invalid KDF key size")
-    if algo_id == ALGO_PBKDF2_SHA256:
-        if extra["iterations"] < 1:
-            raise ContainerError("invalid PBKDF2 iteration count")
-    elif algo_id == ALGO_SCRYPT:
-        n = extra["n"]
-        if n < 2 or (n & (n - 1)) != 0:  # scrypt requires n to be a power of two > 1
-            raise ContainerError("invalid scrypt parameter n")
-        if extra["r"] < 1 or extra["p"] < 1:
-            raise ContainerError("invalid scrypt parameter r or p")
-
 
 def _build_pbkdf2(p: KdfParams) -> KeyDerivation:
     return PBKDF2KeyDerivation(
@@ -139,15 +50,117 @@ def _build_scrypt(p: KdfParams) -> KeyDerivation:
     )
 
 
-_REGISTRY: dict[int, Callable[[KdfParams], KeyDerivation]] = {
-    ALGO_PBKDF2_SHA256: _build_pbkdf2,
-    ALGO_SCRYPT: _build_scrypt,
+def _validate_pbkdf2(extra: dict[str, int]) -> None:
+    if extra["iterations"] < 1:
+        raise ContainerError("invalid PBKDF2 iteration count")
+
+
+def _validate_scrypt(extra: dict[str, int]) -> None:
+    n = extra["n"]
+    if n < 2 or (n & (n - 1)) != 0:  # scrypt requires n to be a power of two > 1
+        raise ContainerError("invalid scrypt parameter n")
+    if extra["r"] < 1 or extra["p"] < 1:
+        raise ContainerError("invalid scrypt parameter r or p")
+
+
+@dataclass(frozen=True)
+class _AlgorithmSpec:
+    """Everything that varies between KDF algorithms, in one place."""
+
+    algo_id: int
+    name: str
+    layout: tuple[tuple[int, str], ...]  # ordered (tag, param-name) entries
+    builder: Callable[[KdfParams], KeyDerivation]
+    validate_extra: Callable[[dict[str, int]], None]
+
+
+# Single source of truth: adding a KDF means adding one entry here.
+_SPECS: dict[int, _AlgorithmSpec] = {
+    ALGO_PBKDF2_SHA256: _AlgorithmSpec(
+        ALGO_PBKDF2_SHA256,
+        "PBKDF2-HMAC-SHA256",
+        ((0x01, "iterations"),),
+        _build_pbkdf2,
+        _validate_pbkdf2,
+    ),
+    ALGO_SCRYPT: _AlgorithmSpec(
+        ALGO_SCRYPT,
+        "scrypt",
+        ((0x10, "n"), (0x11, "r"), (0x12, "p")),
+        _build_scrypt,
+        _validate_scrypt,
+    ),
 }
+
+
+def _spec_for(algo_id: int) -> _AlgorithmSpec:
+    """Look up an algorithm spec, raising the single canonical error if unknown."""
+    try:
+        return _SPECS[algo_id]
+    except KeyError:
+        raise ContainerError(f"unsupported KDF algorithm id: {algo_id}")
+
+
+def algorithm_name(algo_id: int) -> str:
+    """Return the human-readable name for a KDF algorithm id."""
+    return _spec_for(algo_id).name
+
+
+def serialize(params: KdfParams) -> bytes:
+    """Serialize ``params`` to the KDF parameter block."""
+    spec = _spec_for(params.algo_id)
+    chunks = [_PREFIX.pack(params.algo_id, params.key_size, params.salt_size, len(spec.layout))]
+    for tag, key in spec.layout:
+        chunks.append(_TLV.pack(tag, params.extra[key]))
+    return b"".join(chunks)
+
+
+def deserialize(blob: bytes) -> tuple[KdfParams, int]:
+    """Parse a KDF parameter block from the start of ``blob``.
+
+    Returns ``(params, bytes_consumed)``. Raises :class:`ContainerError` on a
+    malformed, truncated, or unknown block.
+    """
+    if len(blob) < _PREFIX.size:
+        raise ContainerError("KDF parameter block is truncated")
+    algo_id, key_size, salt_size, tlv_count = _PREFIX.unpack(blob[: _PREFIX.size])
+
+    spec = _spec_for(algo_id)
+    offset = _PREFIX.size
+    extra: dict[str, int] = {}
+    for _ in range(tlv_count):
+        if offset + _TLV.size > len(blob):
+            raise ContainerError("KDF parameter block is truncated")
+        tag, value = _TLV.unpack(blob[offset : offset + _TLV.size])
+        offset += _TLV.size
+        key = next((k for t, k in spec.layout if t == tag), None)
+        if key is None:
+            raise ContainerError(f"unknown KDF parameter tag: {tag:#x}")
+        extra[key] = value
+
+    expected = {key for _, key in spec.layout}
+    if extra.keys() != expected:
+        raise ContainerError("KDF parameter block is missing required parameters")
+
+    _validate_sizes(key_size, salt_size)
+    spec.validate_extra(extra)
+    return KdfParams(algo_id, key_size, salt_size, extra), offset
+
+
+def _validate_sizes(key_size: int, salt_size: int) -> None:
+    """Reject nonsensical sizes from an untrusted block.
+
+    Crafted values (e.g. ``iterations=0`` or a non-power-of-two scrypt ``n``,
+    handled per-algorithm by the spec validators) would otherwise reach the crypto
+    backend *before* GCM authentication and surface as a ``ValueError`` — or even a
+    Rust ``PanicException`` — instead of a clean :class:`ContainerError`.
+    """
+    if salt_size < 1:
+        raise ContainerError("invalid KDF salt size")
+    if key_size < 1:
+        raise ContainerError("invalid KDF key size")
 
 
 def kdf_from_params(params: KdfParams) -> KeyDerivation:
     """Rebuild a :class:`KeyDerivation` from stored parameters."""
-    builder = _REGISTRY.get(params.algo_id)
-    if builder is None:
-        raise ContainerError(f"unsupported KDF algorithm id: {params.algo_id}")
-    return builder(params)
+    return _spec_for(params.algo_id).builder(params)

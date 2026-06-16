@@ -41,6 +41,14 @@ def _enforce_strength(password: str, allow_weak: bool) -> bool:
     return True
 
 
+def _add_source(parser: argparse.ArgumentParser, help: str) -> None:
+    parser.add_argument("source", help=help)
+
+
+def _add_allow_weak(parser: argparse.ArgumentParser, help: str) -> None:
+    parser.add_argument("--allow-weak", action="store_true", help=help)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="file-vault",
@@ -55,21 +63,19 @@ def build_parser() -> argparse.ArgumentParser:
     enc = sub.add_parser(
         "encrypt", help="encrypt a file or folder into a .vault container"
     )
-    enc.add_argument("source", help="path to the file or folder to encrypt")
+    _add_source(enc, "path to the file or folder to encrypt")
     enc.add_argument("-o", "--output", help="output path (default: <source>.vault)")
-    enc.add_argument(
-        "--allow-weak", action="store_true", help="allow a weak password"
-    )
+    _add_allow_weak(enc, "allow a weak password")
 
     info = sub.add_parser(
         "info", help="show a vault's format and KDF parameters (no password needed)"
     )
-    info.add_argument("source", help="path to the .vault file to inspect")
+    _add_source(info, "path to the .vault file to inspect")
 
     rekey = sub.add_parser(
         "rekey", help="change a vault's password (and optionally upgrade the KDF)"
     )
-    rekey.add_argument("source", help="path to the .vault file to re-key")
+    _add_source(rekey, "path to the .vault file to re-key")
     rekey.add_argument(
         "--new-password",
         help="new password (insecure: prefer the prompt)",
@@ -79,12 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-encrypt using the memory-hard scrypt KDF",
     )
-    rekey.add_argument(
-        "--allow-weak", action="store_true", help="allow a weak new password"
-    )
+    _add_allow_weak(rekey, "allow a weak new password")
 
     dec = sub.add_parser("decrypt", help="decrypt a .vault container")
-    dec.add_argument("source", help="path to the .vault file to decrypt")
+    _add_source(dec, "path to the .vault file to decrypt")
     dec.add_argument(
         "-d",
         "--output-dir",
