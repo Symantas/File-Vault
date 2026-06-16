@@ -1,8 +1,9 @@
 # File-Vault
 
-A small command-line tool for encrypting and decrypting files with a password.
+A small command-line tool for encrypting and decrypting **files and folders**
+with a password.
 
-Files are protected with **AES-256-GCM** (authenticated encryption). The key is
+Data is protected with **AES-256-GCM** (authenticated encryption). The key is
 derived from your password using **PBKDF2-HMAC-SHA256** with a random salt, so
 the same password produces a different ciphertext every time and any tampering
 with an encrypted file is detected on decryption.
@@ -18,25 +19,33 @@ progress) graphical interface.
 
 ## Usage
 
-Encrypt a file (you will be prompted for a password):
+Encrypt a **file** (you will be prompted for a password):
 
 ```bash
 python main.py encrypt secret.txt
 # -> writes secret.txt.vault
 ```
 
-Decrypt it again (the original file name is restored automatically):
+Encrypt a whole **folder** — the entire tree is archived into one container:
 
 ```bash
-python main.py decrypt secret.txt.vault
-# -> writes secret.txt
+python main.py encrypt my-project
+# -> writes my-project.vault
 ```
 
-Choose an explicit output path with `-o`:
+Decrypt again (original names and folder structure are restored automatically):
 
 ```bash
-python main.py encrypt secret.txt -o backup.vault
-python main.py decrypt backup.vault -o restored.txt
+python main.py decrypt my-project.vault
+# restores ./my-project/...
+```
+
+Useful flags:
+
+```bash
+python main.py encrypt secret.txt -o backup.vault   # choose output path
+python main.py decrypt backup.vault -d ./restore     # restore into a directory
+python main.py decrypt backup.vault -f               # allow overwriting files
 ```
 
 > The `--password` flag is supported for scripting but is insecure because the
@@ -45,23 +54,48 @@ python main.py decrypt backup.vault -o restored.txt
 ## Vault file format
 
 ```
-magic "FVLT" (4 bytes) | version (1 byte) | salt (16) | nonce (12) | ciphertext+tag
+container:  magic "FVLT" (4) | version (1) | encrypted blob
+blob:       salt (16) | nonce (12) | ciphertext (+ 16-byte GCM tag)
+plaintext:  a custom archive of the file/folder tree (names + contents)
 ```
 
-The original file name is stored *inside* the encrypted payload, so it is never
-exposed on disk.
+The original names and directory layout live *inside* the encrypted payload, so
+they are never exposed on disk.
 
-## Project layout
+## Architecture
 
-| Path                  | Purpose                                            |
-| --------------------- | -------------------------------------------------- |
-| `Vault/encryption.py` | AES-256-GCM encryption and PBKDF2 key derivation   |
-| `Vault/packer.py`     | Vault container header and payload (de)serializing |
-| `Vault/vault.py`      | High-level encrypt/decrypt-file helpers            |
-| `Vault/cli.py`        | `argparse` command-line interface                  |
-| `GUI/app.py`          | Graphical interface (planned)                      |
-| `Tests/`              | `pytest` test suite                                |
-| `main.py`             | Entry point                                        |
+The library is organized around small, single-responsibility components that
+depend on abstractions, so algorithms (KDF, cipher, archive format) can be
+swapped or tested in isolation:
+
+| Path                  | Responsibility                                          |
+| --------------------- | ------------------------------------------------------- |
+| `Vault/kdf.py`        | `KeyDerivation` interface + PBKDF2 implementation       |
+| `Vault/cipher.py`     | `Encryptor` interface + AES-256-GCM (composes a KDF)    |
+| `Vault/archive.py`    | `Archiver` interface + safe file/folder (de)serializing |
+| `Vault/container.py`  | Versioned vault header framing                          |
+| `Vault/service.py`    | `VaultService` orchestrator (dependency-injected)       |
+| `Vault/errors.py`     | `VaultError` exception hierarchy                        |
+| `Vault/cli.py`        | `argparse` command-line interface                       |
+| `GUI/app.py`          | Graphical interface (planned)                           |
+| `Tests/`              | `pytest` test suite                                     |
+| `main.py`             | Entry point                                             |
+
+`VaultService` wires the defaults together but accepts any `Encryptor`,
+`Archiver`, or `VaultContainer`, e.g.:
+
+```python
+from Vault import VaultService, AesGcmEncryptor, PBKDF2KeyDerivation
+
+service = VaultService(encryptor=AesGcmEncryptor(PBKDF2KeyDerivation(iterations=600_000)))
+service.encrypt_path("my-folder", "password")
+```
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the threat model, hardening measures
+(authenticated encryption, path-traversal protection, symlink handling,
+restrictive file permissions), and known limitations.
 
 ## Running the tests
 
