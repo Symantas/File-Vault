@@ -45,6 +45,9 @@ modified.
   allocation — it raises `ArchiveError` instead.
 - **At-rest exposure of vault files.** Vault containers are created with
   `0600` (owner read/write only) permissions.
+- **Symlink clobber of the output path.** The vault file is opened with
+  `O_NOFOLLOW`, so a symlink planted at the output path is refused rather than
+  followed (which would otherwise truncate the link's target).
 - **Plaintext file names on disk.** Names and the directory layout are stored
   *inside* the encrypted payload, never in the clear.
 

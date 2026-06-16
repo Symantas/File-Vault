@@ -71,8 +71,14 @@ class VaultService:
 
     @staticmethod
     def _write_private(path: str, data: bytes) -> None:
-        """Write ``data`` to ``path`` with 0600 permissions where supported."""
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        """Write ``data`` to ``path`` with 0600 permissions where supported.
+
+        ``O_NOFOLLOW`` makes the open fail rather than follow a symlink planted
+        at the output path, so we never truncate a symlink's target.
+        """
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)  # not available on some platforms
+        fd = os.open(path, flags, 0o600)
         # os.fdopen takes ownership of fd and closes it on context exit.
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)

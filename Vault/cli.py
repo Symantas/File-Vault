@@ -81,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"error: file not found: {exc.filename}", file=sys.stderr)
         return 1
+    except OSError as exc:
+        target = exc.filename or args.source
+        print(f"error: {target}: {exc.strerror}", file=sys.stderr)
+        return 1
     except VaultError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
