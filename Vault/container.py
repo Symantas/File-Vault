@@ -19,6 +19,11 @@ from .errors import ContainerError
 class Container(ABC):
     """Frames an encrypted blob with a self-identifying header."""
 
+    @property
+    @abstractmethod
+    def version(self) -> int:
+        """The format version this container reads and writes."""
+
     @abstractmethod
     def header(self) -> bytes:
         """Return the exact header bytes (used as authenticated associated data)."""
@@ -39,6 +44,10 @@ class VaultContainer(Container):
     VERSION = 3  # v3: self-describing KDF parameters, header authenticated as AAD
 
     _HEADER = struct.Struct(">4sB")
+
+    @property
+    def version(self) -> int:
+        return self.VERSION
 
     def header(self) -> bytes:
         return self._HEADER.pack(self.MAGIC, self.VERSION)

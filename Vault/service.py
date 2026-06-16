@@ -7,12 +7,25 @@ reconfigured or tested without changing this class (Dependency Inversion).
 """
 
 import os
+from dataclasses import dataclass
 
+from . import kdfparams
 from .archive import Archiver, DirectoryArchiver
 from .cipher import AesGcmEncryptor, Encryptor
 from .container import Container, VaultContainer
 
 VAULT_SUFFIX = ".vault"
+
+
+@dataclass(frozen=True)
+class VaultInfo:
+    """Metadata about a vault, readable without the password."""
+
+    version: int
+    kdf_algorithm: str
+    key_size: int
+    salt_size: int
+    parameters: dict[str, int]
 
 
 class VaultService:
@@ -62,17 +75,67 @@ class VaultService:
         ``source`` by default), preserving the original names and tree layout.
         Returns the list of restored file paths.
         """
-        with open(source, "rb") as fh:
-            container = fh.read()
-
-        blob = self._container.unwrap(container)
-        archive = self._encryptor.decrypt(
-            blob, password, associated_data=self._container.header()
-        )
+        archive = self._load_archive(source, password)
 
         if destination_dir is None:
             destination_dir = os.path.dirname(os.path.abspath(source))
         return self._archiver.unpack(archive, destination_dir, overwrite=overwrite)
+
+    def rekey_path(
+        self,
+        source: str,
+        old_password: str,
+        new_password: str,
+        new_encryptor: Encryptor | None = None,
+        destination: str | None = None,
+    ) -> str:
+        """Re-encrypt a vault under a new password without extracting it to disk.
+
+        Decrypts the payload with ``old_password`` and re-encrypts it with
+        ``new_password``. Pass ``new_encryptor`` to also change the KDF (e.g. to
+        upgrade PBKDF2 -> scrypt). Writes in place by default; if the old password
+        is wrong the original file is left untouched (decryption fails first).
+        """
+        archive = self._load_archive(source, old_password)
+
+        encryptor = new_encryptor or self._encryptor
+        blob = encryptor.encrypt(
+            archive, new_password, associated_data=self._container.header()
+        )
+
+        if destination is None:
+            destination = source
+        self._write_private(destination, self._container.wrap(blob))
+        return destination
+
+    def _load_archive(self, source: str, password: str) -> bytes:
+        """Read a vault file and return its decrypted archive payload."""
+        with open(source, "rb") as fh:
+            container = fh.read()
+        blob = self._container.unwrap(container)
+        return self._encryptor.decrypt(
+            blob, password, associated_data=self._container.header()
+        )
+
+    def inspect(self, source: str) -> VaultInfo:
+        """Report a vault's format version and KDF parameters without decrypting.
+
+        This metadata is stored in the clear (and authenticated), so no password
+        is required. Raises :class:`~Vault.errors.ContainerError` if ``source``
+        is not a valid vault.
+        """
+        with open(source, "rb") as fh:
+            data = fh.read()
+
+        blob = self._container.unwrap(data)
+        params, _ = kdfparams.deserialize(blob)
+        return VaultInfo(
+            version=self._container.version,
+            kdf_algorithm=kdfparams.algorithm_name(params.algo_id),
+            key_size=params.key_size,
+            salt_size=params.salt_size,
+            parameters=dict(params.extra),
+        )
 
     @staticmethod
     def _write_private(path: str, data: bytes) -> None:

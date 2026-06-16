@@ -17,7 +17,7 @@ from .kdf import (
     PBKDF2KeyDerivation,
     ScryptKeyDerivation,
 )
-from .service import VAULT_SUFFIX, VaultService
+from .service import VAULT_SUFFIX, VaultInfo, VaultService
 
 __all__ = [
     "Archiver",
@@ -31,6 +31,7 @@ __all__ = [
     "PBKDF2KeyDerivation",
     "ScryptKeyDerivation",
     "VaultService",
+    "VaultInfo",
     "VAULT_SUFFIX",
     "VaultError",
     "DecryptionError",

@@ -41,6 +41,20 @@ _TAGS: dict[int, list[tuple[int, str]]] = {
     ALGO_SCRYPT: [(0x10, "n"), (0x11, "r"), (0x12, "p")],
 }
 
+# Human-readable algorithm names (for `info` / diagnostics).
+ALGO_NAMES: dict[int, str] = {
+    ALGO_PBKDF2_SHA256: "PBKDF2-HMAC-SHA256",
+    ALGO_SCRYPT: "scrypt",
+}
+
+
+def algorithm_name(algo_id: int) -> str:
+    """Return the human-readable name for a KDF algorithm id."""
+    try:
+        return ALGO_NAMES[algo_id]
+    except KeyError:
+        raise ContainerError(f"unsupported KDF algorithm id: {algo_id}")
+
 
 def serialize(params: KdfParams) -> bytes:
     """Serialize ``params`` to the KDF parameter block."""

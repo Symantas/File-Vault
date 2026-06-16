@@ -40,13 +40,36 @@ python main.py decrypt my-project.vault
 # restores ./my-project/...
 ```
 
+Inspect a vault's format and KDF parameters (no password needed — this metadata
+is stored and authenticated, not secret):
+
+```bash
+python main.py info my-project.vault
+# version:    3
+# kdf:        PBKDF2-HMAC-SHA256
+# key size:   256-bit
+# parameters: iterations=480000
+```
+
+Change a vault's password, optionally upgrading to the memory-hard scrypt KDF:
+
+```bash
+python main.py rekey my-project.vault            # prompts for old + new password
+python main.py rekey my-project.vault --scrypt   # also upgrade the KDF
+```
+
 Useful flags:
 
 ```bash
 python main.py encrypt secret.txt -o backup.vault   # choose output path
+python main.py encrypt secret.txt --allow-weak       # bypass the weak-password check
 python main.py decrypt backup.vault -d ./restore     # restore into a directory
 python main.py decrypt backup.vault -f               # allow overwriting files
 ```
+
+> A weak password (too short, or a known common password) is refused at encrypt
+> and rekey time — the only real defense against offline brute force. Use
+> `--allow-weak` to override.
 
 > The `--password` flag is supported for scripting but is insecure because the
 > password is visible in your shell history. Prefer the interactive prompt.
@@ -79,7 +102,8 @@ swapped or tested in isolation:
 | `Vault/cipher.py`     | `Encryptor` interface + AES-256-GCM (composes a KDF)    |
 | `Vault/archive.py`    | `Archiver` interface + safe file/folder (de)serializing |
 | `Vault/container.py`  | `Container` interface + versioned header framing        |
-| `Vault/service.py`    | `VaultService` orchestrator (dependency-injected)       |
+| `Vault/strength.py`   | Password-strength heuristics (weak-password check)      |
+| `Vault/service.py`    | `VaultService` orchestrator (`encrypt`/`decrypt`/`rekey`/`inspect`) |
 | `Vault/errors.py`     | `VaultError` exception hierarchy                        |
 | `Vault/cli.py`        | `argparse` command-line interface                       |
 | `GUI/app.py`          | Graphical interface (planned)                           |

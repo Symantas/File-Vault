@@ -4,7 +4,10 @@ import argparse
 import getpass
 import sys
 
+from . import strength
+from .cipher import AesGcmEncryptor
 from .errors import VaultError
+from .kdf import ScryptKeyDerivation
 from .service import VaultService
 
 
@@ -26,6 +29,18 @@ def _resolve_password(arg_password: str | None, confirm: bool) -> str:
     return _prompt_password(confirm)
 
 
+def _enforce_strength(password: str, allow_weak: bool) -> bool:
+    """Return True if the password may be used; print reasons and False if not."""
+    issues = strength.weaknesses(password)
+    if issues and not allow_weak:
+        print("error: weak password:", file=sys.stderr)
+        for reason in issues:
+            print(f"  - {reason}", file=sys.stderr)
+        print("  (use --allow-weak to proceed anyway)", file=sys.stderr)
+        return False
+    return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="file-vault",
@@ -42,6 +57,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enc.add_argument("source", help="path to the file or folder to encrypt")
     enc.add_argument("-o", "--output", help="output path (default: <source>.vault)")
+    enc.add_argument(
+        "--allow-weak", action="store_true", help="allow a weak password"
+    )
+
+    info = sub.add_parser(
+        "info", help="show a vault's format and KDF parameters (no password needed)"
+    )
+    info.add_argument("source", help="path to the .vault file to inspect")
+
+    rekey = sub.add_parser(
+        "rekey", help="change a vault's password (and optionally upgrade the KDF)"
+    )
+    rekey.add_argument("source", help="path to the .vault file to re-key")
+    rekey.add_argument(
+        "--new-password",
+        help="new password (insecure: prefer the prompt)",
+    )
+    rekey.add_argument(
+        "--scrypt",
+        action="store_true",
+        help="re-encrypt using the memory-hard scrypt KDF",
+    )
+    rekey.add_argument(
+        "--allow-weak", action="store_true", help="allow a weak new password"
+    )
 
     dec = sub.add_parser("decrypt", help="decrypt a .vault container")
     dec.add_argument("source", help="path to the .vault file to decrypt")
@@ -68,8 +108,29 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "encrypt":
             password = _resolve_password(args.password, confirm=True)
+            if not _enforce_strength(password, args.allow_weak):
+                return 1
             out = service.encrypt_path(args.source, password, args.output)
             print(f"Encrypted -> {out}")
+        elif args.command == "rekey":
+            old_password = _resolve_password(args.password, confirm=False)
+            new_password = _resolve_password(args.new_password, confirm=True)
+            if not _enforce_strength(new_password, args.allow_weak):
+                return 1
+            new_encryptor = (
+                AesGcmEncryptor(ScryptKeyDerivation()) if args.scrypt else None
+            )
+            out = service.rekey_path(
+                args.source, old_password, new_password, new_encryptor=new_encryptor
+            )
+            print(f"Re-keyed -> {out}")
+        elif args.command == "info":
+            info = service.inspect(args.source)
+            print(f"version:    {info.version}")
+            print(f"kdf:        {info.kdf_algorithm}")
+            print(f"key size:   {info.key_size * 8}-bit")
+            params = ", ".join(f"{k}={v}" for k, v in info.parameters.items())
+            print(f"parameters: {params}")
         elif args.command == "decrypt":
             password = _resolve_password(args.password, confirm=False)
             written = service.decrypt_path(
