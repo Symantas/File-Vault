@@ -41,7 +41,7 @@ class VaultContainer(Container):
     """The current File-Vault container: a magic + version header."""
 
     MAGIC = b"FVLT"
-    VERSION = 3  # v3: self-describing KDF parameters, header authenticated as AAD
+    VERSION = 4  # v4: DEK + key slots, streamed chunked payload
 
     _HEADER = struct.Struct(">4sB")
 

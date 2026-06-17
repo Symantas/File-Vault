@@ -1,58 +1,55 @@
-"""Archiving of files and directories into a single byte stream.
+"""Streaming archiving of files and directories.
 
 An :class:`Archiver` flattens a path — a single file *or* a whole directory tree
-— into one ``bytes`` object that can then be encrypted, and restores it on the
-way back out.
+— into a *stream* of bytes that can be encrypted chunk-by-chunk, and restores it
+from such a stream, so multi-gigabyte inputs never need to fit in memory.
 
-The built-in :class:`DirectoryArchiver` uses a small custom format that we fully
-control, which lets extraction defend against the classic archive attacks
+The built-in :class:`DirectoryArchiver` uses a small self-delimited format we
+fully control, which lets extraction defend against the classic archive attacks
 (path traversal / "Zip Slip", CWE-22) by construction. Symbolic links are not
 followed when reading and are never recreated when writing.
 
-Archive layout::
+Stream framing (big-endian), terminated by an END record::
 
-    entry_count (4 bytes, big-endian)
-    repeated entry_count times:
-        flags    (1 byte)   bit 0 set => directory
-        path_len (2 bytes)  length of the relative path
-        path     (utf-8, forward-slash separated, relative)
-        size     (8 bytes)  file size            (files only)
-        content  (size bytes)                     (files only)
+    repeated:
+        record_type (1)   0x00 = dir, 0x01 = file, 0xFF = END
+        if dir or file:
+            path_len (2) | path (utf-8, forward-slash separated, relative)
+        if file:
+            repeated: data_len (4) | data        # data_len > 0
+            data_len == 0                          # end of this file's content
+    END
 """
 
 import os
 import struct
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass
 
 from .errors import ArchiveError, OverwriteError, PathTraversalError
 
-_COUNT = struct.Struct(">I")
-_FLAGS = struct.Struct(">B")
-_PATH_LEN = struct.Struct(">H")
-_SIZE = struct.Struct(">Q")
-_FLAG_DIR = 0b1
+_U16 = struct.Struct(">H")
+_U32 = struct.Struct(">I")
+RECORD_DIR = 0x00
+RECORD_FILE = 0x01
+RECORD_END = 0xFF
 MAX_PATH_LEN = 0xFFFF
-
-
-@dataclass(frozen=True)
-class _Entry:
-    path: str  # relative, forward-slash separated
-    is_dir: bool
-    content: bytes = b""
+CONTENT_CHUNK = 64 * 1024
+MAX_CONTENT_CHUNK = 1 << 26  # 64 MiB cap on a single declared data run
 
 
 class Archiver(ABC):
-    """Packs a filesystem path into bytes and unpacks it again."""
+    """Packs a filesystem path into a byte stream and unpacks it again."""
 
     @abstractmethod
-    def pack(self, source: str) -> bytes:
-        """Serialize the file or directory at ``source`` into bytes."""
+    def pack_stream(self, source: str) -> Iterator[bytes]:
+        """Yield the archive of ``source`` as a stream of byte chunks."""
 
     @abstractmethod
-    def unpack(self, data: bytes, destination_dir: str, overwrite: bool = False) -> list[str]:
-        """Restore an archive under ``destination_dir``; return written file paths.
+    def unpack_stream(
+        self, chunks: Iterator[bytes], destination_dir: str, overwrite: bool = False
+    ) -> list[str]:
+        """Restore an archive stream under ``destination_dir``; return written paths.
 
         Contract (all implementations must honor it):
 
@@ -64,11 +61,18 @@ class Archiver(ABC):
           escapes it MUST raise :class:`~Vault.errors.PathTraversalError`.
         """
 
+    # Convenience wrappers for callers that have the whole archive in memory.
+    def pack(self, source: str) -> bytes:
+        return b"".join(self.pack_stream(source))
+
+    def unpack(self, data: bytes, destination_dir: str, overwrite: bool = False) -> list[str]:
+        return self.unpack_stream(iter((data,)), destination_dir, overwrite)
+
 
 class DirectoryArchiver(Archiver):
-    """Recursively archives files and directories using a safe custom format."""
+    """Recursively archives files and directories using a safe streaming format."""
 
-    def pack(self, source: str) -> bytes:
+    def pack_stream(self, source: str) -> Iterator[bytes]:
         source = os.path.abspath(source)
         if not os.path.exists(source):
             raise ArchiveError(f"source does not exist: {source}")
@@ -76,104 +80,87 @@ class DirectoryArchiver(Archiver):
             raise ArchiveError("refusing to archive a symbolic link")
 
         base = os.path.dirname(source)
-        entries = self._collect(source, base)
-        return self._serialize(entries)
+        if os.path.isfile(source):
+            yield from self._file_records(source, base)
+        else:
+            yield _dir_record(self._relpath(source, base))
+            # followlinks=False prevents symlink loops and reading outside the tree.
+            for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+                subdirs = [
+                    d for d in sorted(dirnames)
+                    if not os.path.islink(os.path.join(dirpath, d))
+                ]
+                for name in subdirs:
+                    yield _dir_record(self._relpath(os.path.join(dirpath, name), base))
+                for name in sorted(filenames):
+                    full = os.path.join(dirpath, name)
+                    if os.path.islink(full):
+                        continue  # skip symlinked files
+                    yield from self._file_records(full, base)
+                dirnames[:] = subdirs  # descend only into non-symlinked subdirs
+        yield bytes([RECORD_END])
 
-    def unpack(self, data: bytes, destination_dir: str, overwrite: bool = False) -> list[str]:
+    def unpack_stream(
+        self, chunks: Iterator[bytes], destination_dir: str, overwrite: bool = False
+    ) -> list[str]:
         destination_dir = os.path.abspath(destination_dir)
         os.makedirs(destination_dir, exist_ok=True)
         root = os.path.realpath(destination_dir)
 
+        reader = _StreamReader(chunks)
         written: list[str] = []
-        for entry in self._deserialize(data):
-            target = self._safe_target(root, entry.path)
-            if entry.is_dir:
+        while True:
+            marker = reader.read(1)
+            if not marker:
+                raise ArchiveError("archive stream is truncated (missing END marker)")
+            record_type = marker[0]
+            if record_type == RECORD_END:
+                break
+            if record_type == RECORD_DIR:
+                target = self._safe_target(root, _read_path(reader))
                 os.makedirs(target, exist_ok=True)
-                continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            if os.path.exists(target) and not overwrite:
-                raise OverwriteError(f"refusing to overwrite existing file: {target}")
-            # 'wb' truncates a regular file; O_NOFOLLOW would be stronger but is
-            # not portable. We never create symlinks, so the tree we write is
-            # link-free as long as the destination is.
-            with open(target, "wb") as fh:
-                fh.write(entry.content)
-            written.append(target)
+            elif record_type == RECORD_FILE:
+                target = self._safe_target(root, _read_path(reader))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                if os.path.exists(target) and not overwrite:
+                    raise OverwriteError(f"refusing to overwrite existing file: {target}")
+                self._write_file(target, reader)
+                written.append(target)
+            else:
+                raise ArchiveError(f"unknown archive record type: {record_type}")
         return written
 
     # -- packing helpers ---------------------------------------------------
 
-    def _collect(self, source: str, base: str) -> list[_Entry]:
-        rel = self._relpath(source, base)
-        if os.path.isfile(source):
-            with open(source, "rb") as fh:
-                return [_Entry(rel, is_dir=False, content=fh.read())]
-
-        entries: list[_Entry] = [_Entry(rel, is_dir=True)]
-        # followlinks=False prevents symlink loops and reading outside the tree.
-        for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
-            # Sorted, non-symlinked subdirs: used both for entries and for descent.
-            subdirs = [
-                d for d in sorted(dirnames)
-                if not os.path.islink(os.path.join(dirpath, d))
-            ]
-            for name in subdirs:
-                full = os.path.join(dirpath, name)
-                entries.append(_Entry(self._relpath(full, base), is_dir=True))
-            for name in sorted(filenames):
-                full = os.path.join(dirpath, name)
-                if os.path.islink(full):
-                    continue  # skip symlinked files
-                with open(full, "rb") as fh:
-                    entries.append(_Entry(self._relpath(full, base), is_dir=False, content=fh.read()))
-            dirnames[:] = subdirs  # descend only into the non-symlinked subdirs
-        return entries
+    def _file_records(self, full: str, base: str) -> Iterator[bytes]:
+        yield _file_header(self._relpath(full, base))
+        with open(full, "rb") as fh:
+            while True:
+                data = fh.read(CONTENT_CHUNK)
+                if not data:
+                    break
+                yield _U32.pack(len(data)) + data
+        yield _U32.pack(0)  # end of this file's content
 
     @staticmethod
     def _relpath(path: str, base: str) -> str:
-        rel = os.path.relpath(path, base)
-        return rel.replace(os.sep, "/")
-
-    def _serialize(self, entries: list[_Entry]) -> bytes:
-        chunks = [_COUNT.pack(len(entries))]
-        for entry in entries:
-            encoded = entry.path.encode("utf-8")
-            if len(encoded) > MAX_PATH_LEN:
-                raise ArchiveError(f"path too long to archive: {entry.path}")
-            flags = _FLAG_DIR if entry.is_dir else 0
-            chunks.append(_FLAGS.pack(flags))
-            chunks.append(_PATH_LEN.pack(len(encoded)))
-            chunks.append(encoded)
-            if not entry.is_dir:
-                chunks.append(_SIZE.pack(len(entry.content)))
-                chunks.append(entry.content)
-        return b"".join(chunks)
+        return os.path.relpath(path, base).replace(os.sep, "/")
 
     # -- unpacking helpers -------------------------------------------------
 
-    def _deserialize(self, data: bytes) -> Iterator[_Entry]:
-        view = memoryview(data)
-        offset = 0
-
-        def take(n: int) -> bytes:
-            nonlocal offset
-            if offset + n > len(view):
-                raise ArchiveError("archive is truncated")
-            chunk = view[offset : offset + n]
-            offset += n
-            return bytes(chunk)
-
-        (count,) = _COUNT.unpack(take(_COUNT.size))
-        for _ in range(count):
-            (flags,) = _FLAGS.unpack(take(_FLAGS.size))
-            (path_len,) = _PATH_LEN.unpack(take(_PATH_LEN.size))
-            path = take(path_len).decode("utf-8")
-            is_dir = bool(flags & _FLAG_DIR)
-            if is_dir:
-                yield _Entry(path, is_dir=True)
-            else:
-                (size,) = _SIZE.unpack(take(_SIZE.size))
-                yield _Entry(path, is_dir=False, content=take(size))
+    @staticmethod
+    def _write_file(target: str, reader: "_StreamReader") -> None:
+        # O_NOFOLLOW refuses to follow a symlink planted at the target path.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(target, flags, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            while True:
+                (data_len,) = _U32.unpack(reader.read_exact(_U32.size))
+                if data_len == 0:
+                    break
+                if data_len > MAX_CONTENT_CHUNK:
+                    raise ArchiveError("archive declares an oversized data run")
+                fh.write(reader.read_exact(data_len))
 
     @staticmethod
     def _safe_target(root: str, rel_path: str) -> str:
@@ -191,3 +178,51 @@ class DirectoryArchiver(Archiver):
         if resolved != root and not resolved.startswith(root + os.sep):
             raise PathTraversalError(f"archive path escapes destination: {rel_path!r}")
         return target
+
+
+def _dir_record(rel_path: str) -> bytes:
+    return bytes([RECORD_DIR]) + _encode_path(rel_path)
+
+
+def _file_header(rel_path: str) -> bytes:
+    return bytes([RECORD_FILE]) + _encode_path(rel_path)
+
+
+def _encode_path(rel_path: str) -> bytes:
+    encoded = rel_path.encode("utf-8")
+    if len(encoded) > MAX_PATH_LEN:
+        raise ArchiveError(f"path too long to archive: {rel_path}")
+    return _U16.pack(len(encoded)) + encoded
+
+
+def _read_path(reader: "_StreamReader") -> str:
+    (path_len,) = _U16.unpack(reader.read_exact(_U16.size))
+    return reader.read_exact(path_len).decode("utf-8")
+
+
+class _StreamReader:
+    """Pull exact byte counts from an iterator of byte chunks."""
+
+    def __init__(self, chunks: Iterator[bytes]) -> None:
+        self._it = iter(chunks)
+        self._buf = b""
+        self._eof = False
+
+    def _fill(self, n: int) -> None:
+        while len(self._buf) < n and not self._eof:
+            try:
+                self._buf += next(self._it)
+            except StopIteration:
+                self._eof = True
+
+    def read(self, n: int) -> bytes:
+        """Return up to ``n`` bytes (fewer only at end of stream)."""
+        self._fill(n)
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def read_exact(self, n: int) -> bytes:
+        out = self.read(n)
+        if len(out) < n:
+            raise ArchiveError("archive stream is truncated")
+        return out

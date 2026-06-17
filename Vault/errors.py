@@ -28,3 +28,7 @@ class PathTraversalError(ArchiveError):
 
 class OverwriteError(VaultError):
     """Raised when extraction would overwrite an existing file without consent."""
+
+
+class SlotError(VaultError):
+    """Raised for invalid key-slot operations (e.g. removing the last slot)."""

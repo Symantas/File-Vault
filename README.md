@@ -74,20 +74,25 @@ python main.py decrypt backup.vault -f               # allow overwriting files
 > The `--password` flag is supported for scripting but is insecure because the
 > password is visible in your shell history. Prefer the interactive prompt.
 
-## Vault file format
+## Vault file format (v4)
 
 ```
-container:  magic "FVLT" (4) | version 3 (1) | encrypted blob
-blob:       kdf-param block | salt (16) | nonce (12) | ciphertext (+ 16-byte GCM tag)
-plaintext:  a custom archive of the file/folder tree (names + contents)
+header:   magic "FVLT" (4) | version 4 (1)
+slots:    slot_count (1) | per slot: type (1) | body_len (2) | body
+          (a key slot wraps the random Data Encryption Key under one secret)
+payload:  chunk_size (4) | repeated [ chunk_len (4) | AES-256-GCM chunk+tag ]
 ```
 
-The KDF parameter block makes each vault **self-describing**: it records the key
-derivation algorithm and its work factor, so the key is always re-derived with
-the parameters used at encryption time. The container header and this block are
-authenticated as GCM associated data, so they cannot be tampered with or
-downgraded. The original names and directory layout live *inside* the encrypted
-payload, so they are never exposed on disk.
+A random **Data Encryption Key (DEK)** encrypts the payload once, as a sequence
+of authenticated chunks (the STREAM construction), so arbitrarily large
+files/folders are processed with constant memory. Each **key slot** stores the
+DEK wrapped under a different secret (a password's derived key; public-key
+recipients are coming), which is what enables multiple unlock methods and O(1)
+re-keying. The container header and chunk size are authenticated as GCM
+associated data (anti-downgrade), and each chunk's counter + final-flag detect
+reordering, truncation, and tampering. Names and directory layout live *inside*
+the encrypted payload, never on disk. A KDF parameter block stored in each
+password slot makes the work factor self-describing and upgradable.
 
 ## Architecture
 
@@ -99,8 +104,11 @@ swapped or tested in isolation:
 | --------------------- | ------------------------------------------------------- |
 | `Vault/kdf.py`        | `KeyDerivation` interface + PBKDF2 and scrypt           |
 | `Vault/kdfparams.py`  | KDF-parameter (de)serialization + algorithm registry    |
-| `Vault/cipher.py`     | `Encryptor` interface + AES-256-GCM (composes a KDF)    |
-| `Vault/archive.py`    | `Archiver` interface + safe file/folder (de)serializing |
+| `Vault/stream.py`     | `ChunkStreamEncryptor` — chunked AES-256-GCM (STREAM)   |
+| `Vault/slots.py`      | `KeySlot` interface + `PasswordSlot` (DEK wrapping)     |
+| `Vault/slotcodec.py`  | Key-slot section framing                                 |
+| `Vault/cipher.py`     | `Encryptor` interface + AES-256-GCM (single-shot)       |
+| `Vault/archive.py`    | `Archiver` interface + safe streaming (de)serializing   |
 | `Vault/container.py`  | `Container` interface + versioned header framing        |
 | `Vault/strength.py`   | Password-strength heuristics (weak-password check)      |
 | `Vault/service.py`    | `VaultService` orchestrator (`encrypt`/`decrypt`/`rekey`/`inspect`) |

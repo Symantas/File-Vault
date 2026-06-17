@@ -14,13 +14,14 @@ def test_wrap_unwrap_round_trip(container):
 
 
 def test_header_is_magic_plus_version(container):
-    assert container.header() == b"FVLT\x03"
+    assert container.header() == b"FVLT\x04"
 
 
-def test_v2_file_rejected(container):
-    # A v2 container (clean break: v2 is no longer supported).
-    with pytest.raises(ContainerError):
-        container.unwrap(b"FVLT\x02payload")
+def test_older_versions_rejected(container):
+    # Clean break: v2 and v3 containers are no longer supported.
+    for old in (b"FVLT\x02payload", b"FVLT\x03payload"):
+        with pytest.raises(ContainerError):
+            container.unwrap(old)
 
 
 def test_bad_magic_raises(container):

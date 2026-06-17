@@ -9,6 +9,7 @@ from .errors import (
     DecryptionError,
     OverwriteError,
     PathTraversalError,
+    SlotError,
     VaultError,
 )
 from .kdf import (
@@ -17,7 +18,9 @@ from .kdf import (
     PBKDF2KeyDerivation,
     ScryptKeyDerivation,
 )
-from .service import VAULT_SUFFIX, VaultInfo, VaultService
+from .slots import DEK_SIZE, KeySlot, PasswordSlot
+from .stream import ChunkStreamEncryptor
+from .service import VAULT_SUFFIX, SlotInfo, VaultInfo, VaultService
 
 __all__ = [
     "Archiver",
@@ -30,8 +33,13 @@ __all__ = [
     "KeyDerivation",
     "PBKDF2KeyDerivation",
     "ScryptKeyDerivation",
+    "KeySlot",
+    "PasswordSlot",
+    "DEK_SIZE",
+    "ChunkStreamEncryptor",
     "VaultService",
     "VaultInfo",
+    "SlotInfo",
     "VAULT_SUFFIX",
     "VaultError",
     "DecryptionError",
@@ -39,5 +47,6 @@ __all__ = [
     "ArchiveError",
     "PathTraversalError",
     "OverwriteError",
+    "SlotError",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

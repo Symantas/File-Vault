@@ -1,9 +1,13 @@
-import os
 import struct
 
 import pytest
 
-from Vault.archive import DirectoryArchiver
+from Vault.archive import (
+    RECORD_DIR,
+    RECORD_END,
+    RECORD_FILE,
+    DirectoryArchiver,
+)
 from Vault.errors import ArchiveError, OverwriteError, PathTraversalError
 
 
@@ -85,18 +89,13 @@ def test_skips_symlinks_inside_tree(archiver, tmp_path):
 
 # --- security: malicious archive payloads -------------------------------
 
-def _build_archive(entries):
-    """Hand-craft an archive blob to inject hostile paths."""
-    chunks = [struct.pack(">I", len(entries))]
-    for path, is_dir, content in entries:
-        encoded = path.encode("utf-8")
-        chunks.append(struct.pack(">B", 1 if is_dir else 0))
-        chunks.append(struct.pack(">H", len(encoded)))
-        chunks.append(encoded)
-        if not is_dir:
-            chunks.append(struct.pack(">Q", len(content)))
-            chunks.append(content)
-    return b"".join(chunks)
+def _file_record(path: str, content: bytes) -> bytes:
+    enc = path.encode("utf-8")
+    return (
+        bytes([RECORD_FILE]) + struct.pack(">H", len(enc)) + enc
+        + struct.pack(">I", len(content)) + content
+        + struct.pack(">I", 0)  # end of content
+    )
 
 
 @pytest.mark.parametrize(
@@ -111,14 +110,32 @@ def _build_archive(entries):
     ],
 )
 def test_path_traversal_blocked(archiver, tmp_path, evil_path):
-    blob = _build_archive([(evil_path, False, b"pwned")])
+    blob = _file_record(evil_path, b"pwned") + bytes([RECORD_END])
     with pytest.raises(PathTraversalError):
         archiver.unpack(blob, str(tmp_path / "out"))
-    # Nothing should have been written outside the destination.
     assert not (tmp_path / "escape.txt").exists()
 
 
 def test_truncated_archive_raises(archiver, tmp_path):
-    blob = struct.pack(">I", 5)  # claims 5 entries, has none
+    # A file record whose content run is cut off, with no END marker.
+    enc = b"x.txt"
+    blob = bytes([RECORD_FILE]) + struct.pack(">H", len(enc)) + enc + struct.pack(">I", 100)
+    with pytest.raises(ArchiveError):
+        archiver.unpack(blob, str(tmp_path / "out"))
+
+
+def test_missing_end_marker_raises(archiver, tmp_path):
+    blob = _file_record("ok.txt", b"data")[: -1]  # drop the END... actually no END appended
+    blob = _file_record("ok.txt", b"data")  # complete file record, but no END
+    with pytest.raises(ArchiveError):
+        archiver.unpack(blob, str(tmp_path / "out"))
+
+
+def test_oversized_data_run_rejected(archiver, tmp_path):
+    enc = b"big.bin"
+    blob = (
+        bytes([RECORD_FILE]) + struct.pack(">H", len(enc)) + enc
+        + struct.pack(">I", 0xFFFFFFFF)  # absurd declared run
+    )
     with pytest.raises(ArchiveError):
         archiver.unpack(blob, str(tmp_path / "out"))
