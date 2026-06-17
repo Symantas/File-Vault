@@ -137,29 +137,48 @@ class VaultService:
         *,
         destination: str | None = None,
     ) -> str:
-        """Change a vault's password by rewrapping the DEK; payload is copied as-is."""
+        """Change a password by rewrapping the DEK in place; payload is copied as-is.
+
+        Only the slot the old password unlocks is replaced; other slots are kept.
+        """
         with open(source, "rb") as fh:
             header = self._read_header(fh)
             slots = slotcodec.read_section(fh)
-            dek = self._recover_dek(slots, password=old_password)
+            dek, index = self._recover(slots, password=old_password)
             chunk_size_bytes = _read_exact(fh, _CHUNK_SIZE.size)
+            slots[index] = self._password_slot(dek, new_password)
+            return self._rewrite(source, header, slots, chunk_size_bytes, fh, destination)
 
-            new_slots = self._build_slots(dek, (new_password,), ())
-            if destination is None:
-                destination = source
+    def add_password(
+        self,
+        source: str,
+        *,
+        new_password: str,
+        unlock_password: str | None = None,
+        unlock_identity: object | None = None,
+        destination: str | None = None,
+    ) -> str:
+        """Add a new password slot to a vault (the payload is never re-encrypted)."""
+        with open(source, "rb") as fh:
+            header = self._read_header(fh)
+            slots = slotcodec.read_section(fh)
+            dek, _ = self._recover(slots, password=unlock_password, identity=unlock_identity)
+            chunk_size_bytes = _read_exact(fh, _CHUNK_SIZE.size)
+            slots.append(self._password_slot(dek, new_password))
+            return self._rewrite(source, header, slots, chunk_size_bytes, fh, destination)
 
-            tmp = destination + ".rekey.tmp"
-            try:
-                with self._create_private(tmp) as out:
-                    out.write(header)
-                    out.write(slotcodec.serialize_section(new_slots))
-                    out.write(chunk_size_bytes)
-                    shutil.copyfileobj(fh, out)  # payload passthrough (no re-encrypt)
-                os.replace(tmp, destination)
-            except BaseException:
-                _silent_remove(tmp)
-                raise
-        return destination
+    def remove_slot(self, source: str, *, index: int, destination: str | None = None) -> str:
+        """Remove a key slot by index; refuses to remove the last remaining slot."""
+        with open(source, "rb") as fh:
+            header = self._read_header(fh)
+            slots = slotcodec.read_section(fh)
+            if not 0 <= index < len(slots):
+                raise SlotError(f"no key slot at index {index}")
+            if len(slots) == 1:
+                raise SlotError("cannot remove the only key slot (vault would be unrecoverable)")
+            chunk_size_bytes = _read_exact(fh, _CHUNK_SIZE.size)
+            del slots[index]
+            return self._rewrite(source, header, slots, chunk_size_bytes, fh, destination)
 
     def inspect(self, source: str) -> VaultInfo:
         """Report a vault's version and key slots without unlocking it."""
@@ -185,15 +204,42 @@ class VaultService:
     def _build_recipient_slot(self, dek, recipient) -> tuple[int, bytes]:
         raise NotImplementedError("recipient slots arrive in a later phase")
 
-    def _recover_dek(self, slots, *, password=None, identity=None) -> bytes:
-        for slot_type, body in slots:
+    def _password_slot(self, dek, password) -> tuple[int, bytes]:
+        body = PasswordSlot(self._default_kdf, password).wrap(dek, self._slot_aad(SLOT_PASSWORD))
+        return (SLOT_PASSWORD, body)
+
+    def _recover(self, slots, *, password=None, identity=None) -> tuple[bytes, int]:
+        for index, (slot_type, body) in enumerate(slots):
             dek = unlock_slot(
                 slot_type, body, self._slot_aad(slot_type),
                 password=password, identity=identity,
             )
             if dek is not None:
-                return dek
+                return dek, index
         raise DecryptionError("no key slot could be unlocked with the given secret")
+
+    def _recover_dek(self, slots, *, password=None, identity=None) -> bytes:
+        return self._recover(slots, password=password, identity=identity)[0]
+
+    def _rewrite(self, source, header, slots, chunk_size_bytes, fh, destination) -> str:
+        """Rewrite a vault's header + slot section, copying the payload verbatim.
+
+        ``fh`` must be positioned at the start of the payload. Writes atomically.
+        """
+        if destination is None:
+            destination = source
+        tmp = destination + ".tmp"
+        try:
+            with self._create_private(tmp) as out:
+                out.write(header)
+                out.write(slotcodec.serialize_section(slots))
+                out.write(chunk_size_bytes)
+                shutil.copyfileobj(fh, out)  # payload passthrough (no re-encrypt)
+            os.replace(tmp, destination)
+        except BaseException:
+            _silent_remove(tmp)
+            raise
+        return destination
 
     def _describe_slot(self, index: int, slot_type: int, body: bytes) -> SlotInfo:
         name = slot_name(slot_type)

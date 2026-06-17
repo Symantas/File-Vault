@@ -82,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scrypt(rekey)
     _add_allow_weak(rekey, "allow a weak new password")
 
+    addp = sub.add_parser("add-password", help="add another password to a vault")
+    _add_source(addp, "path to the .vault file")
+    addp.add_argument("--new-password", help="the password to add (insecure: prefer the prompt)")
+    _add_scrypt(addp)
+    _add_allow_weak(addp, "allow a weak new password")
+
+    rmslot = sub.add_parser("remove-slot", help="remove a key slot by index")
+    _add_source(rmslot, "path to the .vault file")
+    rmslot.add_argument("--index", type=int, required=True, help="slot index (see `info`)")
+
     dec = sub.add_parser("decrypt", help="decrypt a .vault container")
     _add_source(dec, "path to the .vault file to decrypt")
     dec.add_argument(
@@ -126,6 +136,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             out = service.rekey_path(args.source, old_password, new_password)
             print(f"Re-keyed -> {out}")
+        elif args.command == "add-password":
+            unlock = _resolve_password(args.password, confirm=False)
+            new_password = _resolve_password(args.new_password, confirm=True)
+            if not _enforce_strength(new_password, args.allow_weak):
+                return 1
+            out = service.add_password(args.source, new_password=new_password, unlock_password=unlock)
+            print(f"Added password slot -> {out}")
+        elif args.command == "remove-slot":
+            out = service.remove_slot(args.source, index=args.index)
+            print(f"Removed slot {args.index} -> {out}")
         elif args.command == "info":
             _print_info(service.inspect(args.source))
         elif args.command == "decrypt":
