@@ -14,11 +14,18 @@ import os
 from abc import ABC, abstractmethod
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from . import kdfparams
 from .errors import ContainerError
 from .kdf import KeyDerivation
+
+_HKDF_INFO = b"file-vault-v4 x25519"
+_X25519_PUB_LEN = 32
 
 DEK_SIZE = 32  # AES-256 data key
 WRAP_NONCE_SIZE = 12
@@ -81,6 +88,53 @@ class PasswordSlot(KeySlot):
         nonce = body[offset + kdf.salt_size : need]
         wrapped = body[need:]
         kek = kdf.derive(password, salt)
+        try:
+            return AESGCM(kek).decrypt(nonce, wrapped, slot_aad)
+        except InvalidTag:
+            return None
+
+
+def _recipient_kek(shared: bytes, ephemeral_pub: bytes, recipient_pub: bytes) -> bytes:
+    """Derive the KEK for an X25519 slot, binding both public keys into the salt."""
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=DEK_SIZE,
+        salt=ephemeral_pub + recipient_pub,
+        info=_HKDF_INFO,
+    ).derive(shared)
+
+
+class RecipientSlot(KeySlot):
+    """Wraps the DEK for an X25519 recipient (no shared secret needed).
+
+    Body layout: ``ephemeral_pub(32) | wrap_nonce(12) | wrapped_dek(+tag)``.
+    """
+
+    slot_type = SLOT_X25519
+
+    def __init__(self, recipient) -> None:
+        self._recipient = recipient
+
+    def wrap(self, dek: bytes, slot_aad: bytes) -> bytes:
+        ephemeral = X25519PrivateKey.generate()
+        ephemeral_pub = ephemeral.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        recipient_pub = self._recipient.public_bytes
+        shared = ephemeral.exchange(self._recipient.public_key())
+        kek = _recipient_kek(shared, ephemeral_pub, recipient_pub)
+        nonce = os.urandom(WRAP_NONCE_SIZE)
+        wrapped = AESGCM(kek).encrypt(nonce, dek, slot_aad)
+        return ephemeral_pub + nonce + wrapped
+
+    @staticmethod
+    def unlock(body: bytes, identity, slot_aad: bytes) -> bytes | None:
+        need = _X25519_PUB_LEN + WRAP_NONCE_SIZE
+        if len(body) < need:
+            raise ContainerError("x25519 slot body is truncated")
+        ephemeral_pub = body[:_X25519_PUB_LEN]
+        nonce = body[_X25519_PUB_LEN:need]
+        wrapped = body[need:]
+        shared = identity.exchange(ephemeral_pub)
+        kek = _recipient_kek(shared, ephemeral_pub, identity.recipient().public_bytes)
         try:
             return AESGCM(kek).decrypt(nonce, wrapped, slot_aad)
         except InvalidTag:

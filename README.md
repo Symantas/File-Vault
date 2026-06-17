@@ -58,6 +58,35 @@ python main.py rekey my-project.vault            # prompts for old + new passwor
 python main.py rekey my-project.vault --scrypt   # also upgrade the KDF
 ```
 
+### Sharing with public-key recipients
+
+Generate an identity (private key file) and share the printed recipient string:
+
+```bash
+python main.py keygen -o my-identity.key
+# Recipient: agevault-pub-OWtNv2bpWBg1_7jyaoUCWD...
+```
+
+Encrypt *to* one or more recipients — no shared password needed — and let the
+holder of the matching identity decrypt:
+
+```bash
+python main.py encrypt report.pdf --recipient agevault-pub-...
+python main.py decrypt report.pdf.vault --identity my-identity.key
+```
+
+### Managing who can open a vault
+
+A vault can have several key slots (passwords and/or recipients); any one opens
+it, and adding or removing a slot never re-encrypts the data:
+
+```bash
+python main.py add-password  my.vault                       # add another password
+python main.py add-recipient my.vault --recipient agevault-pub-... --identity my-identity.key
+python main.py info          my.vault                       # list slots
+python main.py remove-slot   my.vault --index 0             # revoke a slot
+```
+
 Useful flags:
 
 ```bash
@@ -105,8 +134,9 @@ swapped or tested in isolation:
 | `Vault/kdf.py`        | `KeyDerivation` interface + PBKDF2 and scrypt           |
 | `Vault/kdfparams.py`  | KDF-parameter (de)serialization + algorithm registry    |
 | `Vault/stream.py`     | `ChunkStreamEncryptor` — chunked AES-256-GCM (STREAM)   |
-| `Vault/slots.py`      | `KeySlot` interface + `PasswordSlot` (DEK wrapping)     |
+| `Vault/slots.py`      | `KeySlot` interface + `PasswordSlot` / `RecipientSlot`   |
 | `Vault/slotcodec.py`  | Key-slot section framing                                 |
+| `Vault/identity.py`   | X25519 `Identity` / `Recipient` keys                    |
 | `Vault/cipher.py`     | `Encryptor` interface + AES-256-GCM (single-shot)       |
 | `Vault/archive.py`    | `Archiver` interface + safe streaming (de)serializing   |
 | `Vault/container.py`  | `Container` interface + versioned header framing        |

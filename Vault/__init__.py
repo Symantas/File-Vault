@@ -18,7 +18,8 @@ from .kdf import (
     PBKDF2KeyDerivation,
     ScryptKeyDerivation,
 )
-from .slots import DEK_SIZE, KeySlot, PasswordSlot
+from .identity import Identity, IdentityError, Recipient
+from .slots import DEK_SIZE, KeySlot, PasswordSlot, RecipientSlot
 from .stream import ChunkStreamEncryptor
 from .service import VAULT_SUFFIX, SlotInfo, VaultInfo, VaultService
 
@@ -35,6 +36,10 @@ __all__ = [
     "ScryptKeyDerivation",
     "KeySlot",
     "PasswordSlot",
+    "RecipientSlot",
+    "Identity",
+    "Recipient",
+    "IdentityError",
     "DEK_SIZE",
     "ChunkStreamEncryptor",
     "VaultService",

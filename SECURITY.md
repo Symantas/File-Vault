@@ -8,12 +8,26 @@ current revision.
 
 | Concern              | Choice                                                              |
 | -------------------- | ------------------------------------------------------------------ |
-| Confidentiality      | AES-256-GCM                                                         |
+| Confidentiality      | AES-256-GCM over a random per-vault Data Encryption Key (DEK)       |
 | Integrity / tamper   | GCM authentication tag (AEAD) — decryption fails on changes        |
+| Large data           | Chunked AEAD stream (STREAM): counter+final-flag nonce, per chunk   |
+| Key wrapping         | DEK wrapped per key slot: password (KDF→KEK) or X25519 (ECDH→HKDF)  |
 | Key derivation       | PBKDF2-HMAC-SHA256 (480k iters, default) or memory-hard scrypt      |
 | KDF parameters       | Stored in the vault and authenticated — self-describing, upgradable |
-| Salt                 | 16 random bytes per encryption (`os.urandom`)                      |
-| Nonce                | 12 random bytes per encryption (`os.urandom`)                      |
+| Salt / nonce         | Fresh random per wrap/encryption (`os.urandom`)                    |
+
+**DEK + key slots.** The payload is encrypted once under a random 32-byte DEK.
+Each key slot stores that DEK wrapped under a different secret — a password
+(KEK derived via the KDF) or an X25519 recipient (ephemeral ECDH → HKDF-SHA256,
+with the ephemeral and recipient public keys bound into the HKDF salt). Any slot
+unlocks the vault, and adding/removing a slot only rewraps the 48-byte DEK, so
+the bulk payload is never re-encrypted. Removing the last slot is refused.
+
+**Streamed payload.** Large inputs are encrypted as fixed-size AES-256-GCM chunks
+with a per-chunk counter nonce (safe — the DEK is random and unique per vault) and
+a final-flag byte. The counter and flag are in each chunk's AAD, so reordering,
+duplication, truncation, and extension are all detected; decryption stages into a
+temporary directory and only publishes output once the whole stream verifies.
 
 **Self-describing, upgradable KDF.** Each vault stores the KDF algorithm and its
 parameters (e.g. PBKDF2 iteration count, or scrypt `n`/`r`/`p`) in a small block

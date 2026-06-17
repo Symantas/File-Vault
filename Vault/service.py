@@ -22,7 +22,9 @@ from .kdf import KeyDerivation, PBKDF2KeyDerivation
 from .slots import (
     DEK_SIZE,
     SLOT_PASSWORD,
+    SLOT_X25519,
     PasswordSlot,
+    RecipientSlot,
     slot_name,
     unlock_slot,
 )
@@ -167,6 +169,24 @@ class VaultService:
             slots.append(self._password_slot(dek, new_password))
             return self._rewrite(source, header, slots, chunk_size_bytes, fh, destination)
 
+    def add_recipient(
+        self,
+        source: str,
+        *,
+        recipient,
+        unlock_password: str | None = None,
+        unlock_identity: object | None = None,
+        destination: str | None = None,
+    ) -> str:
+        """Add an X25519 recipient slot to a vault (payload is never re-encrypted)."""
+        with open(source, "rb") as fh:
+            header = self._read_header(fh)
+            slots = slotcodec.read_section(fh)
+            dek, _ = self._recover(slots, password=unlock_password, identity=unlock_identity)
+            chunk_size_bytes = _read_exact(fh, _CHUNK_SIZE.size)
+            slots.append(self._build_recipient_slot(dek, recipient))
+            return self._rewrite(source, header, slots, chunk_size_bytes, fh, destination)
+
     def remove_slot(self, source: str, *, index: int, destination: str | None = None) -> str:
         """Remove a key slot by index; refuses to remove the last remaining slot."""
         with open(source, "rb") as fh:
@@ -202,7 +222,8 @@ class VaultService:
         return slots
 
     def _build_recipient_slot(self, dek, recipient) -> tuple[int, bytes]:
-        raise NotImplementedError("recipient slots arrive in a later phase")
+        body = RecipientSlot(recipient).wrap(dek, self._slot_aad(SLOT_X25519))
+        return (SLOT_X25519, body)
 
     def _password_slot(self, dek, password) -> tuple[int, bytes]:
         body = PasswordSlot(self._default_kdf, password).wrap(dek, self._slot_aad(SLOT_PASSWORD))
